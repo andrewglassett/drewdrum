@@ -140,6 +140,27 @@ body {
 }
 .fx-knobs { display: flex; gap: 4px; align-items: flex-start; }
 
+/* ── Chaos button ── */
+.chaos-btn {
+  padding: 5px 10px; border-radius: 20px;
+  border: 1.5px solid rgba(210,60,130,0.4);
+  background: rgba(255,255,255,0.45);
+  color: rgba(160,30,90,0.65);
+  font-family: 'Comic Sans MS','Chalkboard SE',cursive;
+  font-size: 7px; font-weight: bold; letter-spacing: 1px;
+  cursor: pointer; outline: none;
+  transition: all 100ms;
+}
+.chaos-btn.active {
+  background: linear-gradient(135deg, #ff69b4, #f06898);
+  border-color: #c0126a; color: #fff;
+  animation: chaos-pulse 1.5s ease-in-out infinite;
+}
+@keyframes chaos-pulse {
+  0%, 100% { box-shadow: 0 0 8px rgba(255,105,180,0.6), 0 0 18px rgba(255,105,180,0.25); }
+  50%       { box-shadow: 0 0 14px rgba(255,105,180,0.9), 0 0 28px rgba(255,105,180,0.5); }
+}
+
 /* ── Sequencer ── */
 .machine-seq {
   padding: 16px 22px 14px 24px;
@@ -572,16 +593,177 @@ const fxParams = {
     size: { value: 1.8, min: 0.1, max: 6.0, label: 'Size' },
     mix:  { value: 0,   min: 0,   max: 1.0, label: 'Mix'  },
   },
+  chaos: {
+    amt: { value: 0.5, min: 0, max: 1.0, label: 'Amt' },
+  },
 };
 
 // ─── FX chain ─────────────────────────────────────────────────────────────────
-let _masterIn     = null;
-let _fxDelay      = null;
-let _fxDelayFB    = null;
-let _fxDelayWet   = null;
-let _fxDistShaper = null;
-let _fxConvolver  = null;
-let _fxReverbWet  = null;
+let _masterIn      = null;
+let _fxDelay       = null;
+let _fxDelayFB     = null;
+let _fxDelayWet    = null;
+let _fxDistShaper  = null;
+let _fxConvolver   = null;
+let _fxReverbWet   = null;
+
+// ─── Chaos effect ─────────────────────────────────────────────────────────────
+let _chaosBus   = null;
+let _chaosWet   = null;
+let _chaosOn    = false;
+let _chaosChain = null; // { input: AudioNode, stopFns: [fn, ...] }
+
+function fx_tremolo(a) {
+  const input  = a.createGain();
+  const output = a.createGain();
+  const lfo    = a.createOscillator();
+  const lfoG   = a.createGain();
+  lfo.frequency.value = 2 + Math.random() * 8;
+  output.gain.value   = 0.5;
+  lfoG.gain.value     = 0.3 + Math.random() * 0.2;
+  lfo.connect(lfoG); lfoG.connect(output.gain);
+  input.connect(output); lfo.start();
+  return { input, output, stop: () => { try { lfo.stop(); } catch(e) {} } };
+}
+
+function fx_chorus(a) {
+  const input  = a.createGain();
+  const output = a.createGain();
+  const delay  = a.createDelay(0.05);
+  const lfo    = a.createOscillator();
+  const lfoG   = a.createGain();
+  const wet    = a.createGain();
+  delay.delayTime.value = 0.008 + Math.random() * 0.017;
+  lfo.frequency.value   = 0.5 + Math.random() * 3.5;
+  lfoG.gain.value       = 0.002 + Math.random() * 0.006;
+  wet.gain.value        = 0.6;
+  lfo.connect(lfoG); lfoG.connect(delay.delayTime);
+  input.connect(delay); delay.connect(wet);
+  input.connect(output); wet.connect(output); lfo.start();
+  return { input, output, stop: () => { try { lfo.stop(); } catch(e) {} } };
+}
+
+function fx_flanger(a) {
+  const input  = a.createGain();
+  const output = a.createGain();
+  const delay  = a.createDelay(0.02);
+  const fb     = a.createGain();
+  const lfo    = a.createOscillator();
+  const lfoG   = a.createGain();
+  const wet    = a.createGain();
+  delay.delayTime.value = 0.001 + Math.random() * 0.004;
+  fb.gain.value         = 0.5 + Math.random() * 0.3;
+  lfo.frequency.value   = 0.1 + Math.random() * 1.9;
+  lfoG.gain.value       = 0.0005 + Math.random() * 0.002;
+  wet.gain.value        = 0.7;
+  lfo.connect(lfoG); lfoG.connect(delay.delayTime);
+  input.connect(delay); delay.connect(fb); fb.connect(delay);
+  delay.connect(wet); input.connect(output); wet.connect(output); lfo.start();
+  return { input, output, stop: () => { try { lfo.stop(); } catch(e) {} } };
+}
+
+function fx_ringmod(a) {
+  const input    = a.createGain();
+  const output   = a.createGain();
+  const carrier  = a.createOscillator();
+  const carrierG = a.createGain();
+  const ring     = a.createGain();
+  carrier.frequency.value = 30 + Math.random() * 970;
+  carrierG.gain.value     = 1.0;
+  ring.gain.value         = 0;
+  carrier.connect(carrierG); carrierG.connect(ring.gain);
+  input.connect(ring); ring.connect(output); carrier.start();
+  return { input, output, stop: () => { try { carrier.stop(); } catch(e) {} } };
+}
+
+function fx_autowah(a) {
+  const input  = a.createGain();
+  const output = a.createGain();
+  const filter = a.createBiquadFilter();
+  const lfo    = a.createOscillator();
+  const lfoG   = a.createGain();
+  const wet    = a.createGain();
+  filter.type           = 'bandpass';
+  filter.frequency.value = 300 + Math.random() * 700;
+  filter.Q.value         = 4 + Math.random() * 7;
+  lfo.frequency.value    = 0.5 + Math.random() * 3.5;
+  lfoG.gain.value        = 600 + Math.random() * 1400;
+  wet.gain.value         = 4;
+  lfo.connect(lfoG); lfoG.connect(filter.frequency);
+  input.connect(filter); filter.connect(wet);
+  input.connect(output); wet.connect(output); lfo.start();
+  return { input, output, stop: () => { try { lfo.stop(); } catch(e) {} } };
+}
+
+function fx_bitcrush(a) {
+  const input  = a.createGain();
+  const output = a.createGain();
+  const bits   = 2 + Math.floor(Math.random() * 5);
+  const steps  = Math.pow(2, bits);
+  const n      = 2048;
+  const curve  = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * 2 - 1;
+    curve[i] = Math.round(x * steps) / steps;
+  }
+  const shaper = a.createWaveShaper();
+  shaper.curve = curve; shaper.oversample = 'none';
+  input.connect(shaper); shaper.connect(output);
+  return { input, output, stop: () => {} };
+}
+
+function fx_resonator(a) {
+  const input  = a.createGain();
+  const output = a.createGain();
+  const fund   = 80 + Math.random() * 420;
+  const Q      = 20 + Math.random() * 60;
+  const makeup = a.createGain();
+  makeup.gain.value = 4;
+  for (let i = 1; i <= 3; i++) {
+    const f = a.createBiquadFilter();
+    f.type = 'bandpass'; f.frequency.value = fund * i; f.Q.value = Q;
+    input.connect(f); f.connect(makeup);
+  }
+  input.connect(output); makeup.connect(output);
+  return { input, output, stop: () => {} };
+}
+
+const _chaosPool = [fx_tremolo, fx_chorus, fx_flanger, fx_ringmod, fx_autowah, fx_bitcrush, fx_resonator];
+
+function randomizeChaos() {
+  const a = ac();
+  if (_chaosChain) {
+    try { _chaosBus.disconnect(_chaosChain.input); } catch(e) {}
+    _chaosChain.stopFns.forEach(fn => fn());
+    _chaosChain = null;
+  }
+  const pool = _chaosPool.slice();
+  const i1   = Math.floor(Math.random() * pool.length);
+  const [fn1] = pool.splice(i1, 1);
+  const fn2   = pool[Math.floor(Math.random() * pool.length)];
+  const e1 = fn1(a), e2 = fn2(a);
+  _chaosBus.connect(e1.input);
+  e1.output.connect(e2.input);
+  e2.output.connect(_chaosWet);
+  _chaosChain = { input: e1.input, stopFns: [e1.stop, e2.stop] };
+}
+
+function toggleChaos(btn) {
+  _chaosOn = !_chaosOn;
+  if (_chaosOn) {
+    randomizeChaos();
+    if (_chaosWet) _chaosWet.gain.setTargetAtTime(fxParams.chaos.amt.value, ac().currentTime, 0.02);
+    btn.textContent = 'ON'; btn.classList.add('active');
+  } else {
+    if (_chaosWet) _chaosWet.gain.setTargetAtTime(0, ac().currentTime, 0.02);
+    btn.textContent = 'OFF'; btn.classList.remove('active');
+  }
+}
+
+function onChaosAmt(v) {
+  fxParams.chaos.amt.value = v;
+  if (_chaosOn && _chaosWet) _chaosWet.gain.setTargetAtTime(v, ac().currentTime, 0.02);
+}
 
 function makeIR(decaySec) {
   const a = ac();
@@ -634,6 +816,13 @@ function getDestination() {
   _fxDelayWet = a.createGain();
   _fxDelayWet.gain.value = fxParams.delay.mix.value;
 
+  // ── Chaos parallel bus ───────────────────────────────────────────────────
+  _chaosBus = a.createGain();
+  _chaosWet = a.createGain();
+  _chaosWet.gain.value = 0;
+  reverbOut.connect(_chaosBus);
+  _chaosWet.connect(a.destination);
+
   reverbOut.connect(a.destination);   // dry out
   reverbOut.connect(_fxDelay);
   _fxDelay.connect(_fxDelayFB);
@@ -650,7 +839,6 @@ function onDelayMix(v)   { if (_fxDelayWet)   _fxDelayWet.gain.value = v; }
 function onDistDrive(v)  { if (_fxDistShaper) _fxDistShaper.curve = driveCurve(v); }
 function onReverbSize(v) { if (_fxConvolver)  _fxConvolver.buffer = makeIR(v); }
 function onReverbMix(v)  { if (_fxReverbWet)  _fxReverbWet.gain.value = v; }
-
 // ─── Build FX strip ───────────────────────────────────────────────────────────
 function buildFX() {
   const container = document.getElementById('machine-fx');
@@ -676,6 +864,24 @@ function buildFX() {
     { param: fxParams.reverb.size, onUpdate: onReverbSize },
     { param: fxParams.reverb.mix,  onUpdate: onReverbMix  },
   ]);
+
+  // ── Chaos section ──────────────────────────────────────────────────────────
+  const chaosSec = document.createElement('div'); chaosSec.className = 'fx-section';
+  const chaosLbl = document.createElement('div'); chaosLbl.className = 'fx-section-label'; chaosLbl.textContent = 'Chaos ✨';
+  chaosSec.appendChild(chaosLbl);
+
+  const chaosRow = document.createElement('div'); chaosRow.className = 'fx-knobs';
+
+  const btnUnit = document.createElement('div'); btnUnit.className = 'knob-unit';
+  btnUnit.style.justifyContent = 'center';
+  const chaosBtn = document.createElement('button'); chaosBtn.className = 'chaos-btn'; chaosBtn.textContent = 'OFF';
+  chaosBtn.addEventListener('click', () => toggleChaos(chaosBtn));
+  btnUnit.appendChild(chaosBtn);
+  chaosRow.appendChild(btnUnit);
+
+  chaosRow.appendChild(makeKnobUnit(fxParams.chaos.amt, onChaosAmt));
+  chaosSec.appendChild(chaosRow);
+  container.appendChild(chaosSec);
 }
 
 function makeKnobUnit(param, onUpdate) {
